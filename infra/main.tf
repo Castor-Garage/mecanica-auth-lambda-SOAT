@@ -1,11 +1,15 @@
-# Provisiona a Function Serverless de autenticacao por CPF e o API Gateway
-# (HTTP API) que a expoe publicamente, seguindo o mesmo padrao AWS Academy
-# usado em mecanica-pos-SOAT/infra/aws (LabRole reaproveitado como execution
-# role, nada de IAM role nova, credenciais via variaveis de ambiente padrao
-# AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN).
+# Provisiona as Functions Serverless deste repositorio, seguindo o mesmo
+# padrao AWS Academy usado em mecanica-k8s-infra-SOAT (LabRole reaproveitado
+# como execution role, nada de IAM role nova, credenciais via variaveis de
+# ambiente padrao AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN):
+#
+#   - auth_cpf: autenticacao por CPF (POST /auth/cpf)
+#   - jwt_authorizer: authorizer do API Gateway nas rotas da API principal
+#
+# O API Gateway que expoe as duas fica em gateway.tf.
 #
 # Pre-requisito: `npm run package` na raiz do repo, que gera ../function.zip
-# a partir de src/handler.ts (ver package.json).
+# com src/handler.ts e src/authorizer.ts (ver package.json).
 
 locals {
   use_vpc = var.vpc_id != ""
@@ -63,47 +67,29 @@ resource "aws_cloudwatch_log_group" "auth_cpf" {
   retention_in_days = 14
 }
 
-resource "aws_apigatewayv2_api" "this" {
-  name          = var.api_name
-  protocol_type = "HTTP"
+# Confere o JWT (de cliente ou de admin) antes de o Gateway repassar a
+# requisicao para a API principal. Nao acessa banco, entao roda fora de VPC.
+resource "aws_lambda_function" "jwt_authorizer" {
+  function_name = var.authorizer_function_name
+  role          = var.lab_role_arn
+  handler       = "authorizer.handler"
+  runtime       = "nodejs20.x"
 
-  cors_configuration {
-    allow_origins = [var.cors_origin]
-    allow_methods = ["POST", "OPTIONS"]
-    allow_headers = ["content-type"]
+  # mesmo pacote da Lambda de CPF: o zip traz handler.mjs e authorizer.mjs
+  filename         = var.function_zip_path
+  source_code_hash = filebase64sha256(var.function_zip_path)
+
+  timeout     = 5
+  memory_size = 128
+
+  environment {
+    variables = {
+      JWT_SECRET = var.jwt_secret
+    }
   }
 }
 
-resource "aws_apigatewayv2_stage" "default" {
-  api_id      = aws_apigatewayv2_api.this.id
-  name        = "$default"
-  auto_deploy = true
-}
-
-# Repassa o request id do Gateway para a Lambda no header x-request-id, para
-# a mesma correlacao de logs (requestId) usada na API principal — ver
-# mecanica-pos-SOAT/docs/observabilidade.md.
-resource "aws_apigatewayv2_integration" "auth_cpf" {
-  api_id                 = aws_apigatewayv2_api.this.id
-  integration_type       = "AWS_PROXY"
-  integration_uri        = aws_lambda_function.auth_cpf.invoke_arn
-  payload_format_version = "2.0"
-
-  request_parameters = {
-    "overwrite:header.x-request-id" = "$context.requestId"
-  }
-}
-
-resource "aws_apigatewayv2_route" "auth_cpf" {
-  api_id    = aws_apigatewayv2_api.this.id
-  route_key = "POST /auth/cpf"
-  target    = "integrations/${aws_apigatewayv2_integration.auth_cpf.id}"
-}
-
-resource "aws_lambda_permission" "apigw" {
-  statement_id  = "AllowAPIGatewayInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.auth_cpf.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.this.execution_arn}/*/*"
+resource "aws_cloudwatch_log_group" "jwt_authorizer" {
+  name              = "/aws/lambda/${var.authorizer_function_name}"
+  retention_in_days = 14
 }
