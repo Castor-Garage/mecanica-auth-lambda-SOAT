@@ -11,9 +11,20 @@ on:
         description: 'Lock ID a liberar (terraform force-unlock). So preencha se um apply anterior tiver ficado com o state travado.'
         required: false
         type: string
+      import_existing:
+        description: 'Importa para o state os recursos que ja existem na AWS mas nao estao rastreados (state drift do apply do PR #2 que foi cancelado no meio). Marque true so para rodar isso uma vez.'
+        required: false
+        type: boolean
+        default: false
 
 env:
   AWS_REGION: us-east-1
+  # VPC default do Academy: a Lambda auth_cpf precisa estar dentro dela porque
+  # o security group do RDS (castor-garage-db) so libera a porta 5432 para o
+  # CIDR interno da VPC (172.31.0.0/16), mesmo o RDS sendo "publicly accessible".
+  # Nao sao segredos, apenas IDs de rede da conta AWS Academy do Learner Lab.
+  TF_VAR_vpc_id: vpc-0605fa293ce8418c3
+  TF_VAR_subnet_ids: '["subnet-0fb931f473a349b3c","subnet-07cad325cb913e3c0"]'
 
 jobs:
   unlock:
@@ -45,6 +56,82 @@ jobs:
       - name: Terraform force-unlock
         working-directory: infra
         run: terraform force-unlock -force "${{ inputs.unlock_id }}"
+
+  import-existing-resources:
+    name: Importa recursos ja existentes (manual, one-off)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.import_existing == true
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Empacotar a Lambda (function.zip)
+        run: npm run package
+
+      - name: Configurar credenciais AWS (sessao temporaria do Academy)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform init
+        working-directory: infra
+        run: terraform init
+
+      # O apply do PR #2 (run 35035723739) criou estes recursos na AWS com
+      # sucesso, mas foi cancelado antes de persistir o state atualizado no
+      # S3 (ficou preso 44min destruindo o security group da Lambda por
+      # causa de uma ENI que a AWS ainda nao tinha liberado). O state remoto
+      # ficou achando que eles nao existem, entao todo apply seguinte tenta
+      # recria-los e colide (ResourceAlreadyExistsException / Conflict).
+      # Import e idempotente: se o recurso ja estiver no state, falha sem
+      # efeito colateral, entao "|| true" so evita que uma re-execucao pare
+      # no meio por causa de um import ja feito antes.
+      - name: Importar recursos existentes para o state
+        working-directory: infra
+        env:
+          TF_VAR_lab_role_arn: ${{ secrets.LAB_ROLE_ARN }}
+          TF_VAR_database_url: ${{ secrets.DATABASE_URL }}
+          TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET }}
+        run: |
+          set -x
+          terraform import aws_cloudwatch_log_group.jwt_authorizer /aws/lambda/castor-garage-jwt-authorizer || true
+          terraform import 'aws_cloudwatch_log_group.api_gateway[0]' /aws/apigateway/castor-garage-api-gateway || true
+          terraform import aws_lambda_function.jwt_authorizer castor-garage-jwt-authorizer || true
+          terraform import aws_lambda_permission.apigw_authorizer castor-garage-jwt-authorizer/AllowAPIGatewayInvokeAuthorizer || true
+          terraform import aws_apigatewayv2_authorizer.jwt licz8mblpc/n5np6r || true
+          terraform import aws_apigatewayv2_route.backend_protected licz8mblpc/vltp73q || true
+          terraform import 'aws_apigatewayv2_route.backend_public["GET /docs"]' licz8mblpc/u7eu2xj || true
+          terraform import 'aws_apigatewayv2_route.backend_public["GET /docs/{proxy+}"]' licz8mblpc/4i9zv9f || true
+          terraform import 'aws_apigatewayv2_route.backend_public["GET /health"]' licz8mblpc/ky91r12 || true
+          terraform import 'aws_apigatewayv2_route.backend_public["OPTIONS /{proxy+}"]' licz8mblpc/9mf0jt9 || true
+          terraform import 'aws_apigatewayv2_route.backend_public["POST /auth/login"]' licz8mblpc/ux3o71j || true
+          terraform import 'aws_apigatewayv2_route.backend_public["POST /webhooks/email"]' licz8mblpc/qak5fa3 || true
+
+      - name: Mostrar plano apos os imports (deve ficar perto de "no changes")
+        working-directory: infra
+        env:
+          TF_VAR_lab_role_arn: ${{ secrets.LAB_ROLE_ARN }}
+          TF_VAR_database_url: ${{ secrets.DATABASE_URL }}
+          TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET }}
+        run: terraform plan
 
   test:
     name: Testes automatizados
