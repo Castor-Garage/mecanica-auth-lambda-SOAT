@@ -5,11 +5,47 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      unlock_id:
+        description: 'Lock ID a liberar (terraform force-unlock). So preencha se um apply anterior tiver ficado com o state travado.'
+        required: false
+        type: string
 
 env:
   AWS_REGION: us-east-1
 
 jobs:
+  unlock:
+    name: Liberar lock do state (manual)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.unlock_id != ''
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Configurar credenciais AWS (sessao temporaria do Academy)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform init
+        working-directory: infra
+        run: terraform init
+
+      - name: Terraform force-unlock
+        working-directory: infra
+        run: terraform force-unlock -force "${{ inputs.unlock_id }}"
+
   test:
     name: Testes automatizados
     runs-on: ubuntu-latest
