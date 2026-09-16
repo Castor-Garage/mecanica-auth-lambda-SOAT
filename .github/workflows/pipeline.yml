@@ -40,6 +40,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
+    timeout-minutes: 10
 
     steps:
       - name: Checkout code
@@ -78,7 +79,8 @@ jobs:
           TF_VAR_lab_role_arn: ${{ secrets.LAB_ROLE_ARN }}
           TF_VAR_database_url: ${{ secrets.DATABASE_URL }}
           TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET }}
-        run: terraform apply -auto-approve
+          TF_LOG: INFO
+        run: terraform apply -auto-approve -lock-timeout=2m
 
       - name: Mostrar endpoint publicado
         working-directory: infra
