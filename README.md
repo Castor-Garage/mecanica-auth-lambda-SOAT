@@ -91,7 +91,7 @@ Não há servidor HTTP local incluso (são funções puras `handler(event)`); pa
 **Ordem entre os repositórios:** o Gateway lê do SSM o hostname do Load Balancer da API (`/castor-garage/production/backend-url`), que o job `deploy-production` de `mecanica-pos-SOAT` publica. A API precisa ter sido publicada em produção ao menos uma vez antes do primeiro `apply` daqui. Se o Load Balancer mudar (Service recriado), rode o pipeline deste repositório de novo para o Gateway apontar para o endereço novo.
 
 1. Gerar o pacote: `npm run package` → cria `function.zip` na raiz, com as duas Lambdas (`handler.mjs` e `authorizer.mjs`).
-2. `cd infra && terraform init`
+2. `cd infra && terraform init -backend-config="bucket=castor-garage-tfstate-$(aws sts get-caller-identity --query Account --output text)"`. O state fica no bucket `castor-garage-tfstate-<account-id>`, com o ID da conta AWS das credenciais em uso, para o mesmo código servir à conta do Academy de qualquer integrante; o pipeline cria esse bucket se ele ainda não existir.
 3. Definir as variáveis obrigatórias (não têm default, por serem sensíveis):
 
    ```bash
